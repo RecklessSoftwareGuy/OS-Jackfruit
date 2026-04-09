@@ -32,3 +32,9 @@ logs/
 *.swp
 *~
 .vscode/
+
+# Agent IDE
+.agents/
+AGENTS.md
+GEMINI.md
+.gemini/
