@@ -1,111 +1,106 @@
-# Multi-Container Runtime
+# Multi-Container Linux Runtime
 
-A lightweight Linux container runtime in C with a long-running supervisor and a kernel-space memory monitor.
+**Team Size:** 2 Students
 
-Read [`project-guide.md`](project-guide.md) for the full project specification.
+## Overview
+This lightweight Linux container runtime creates isolated user-space processes (using namespaces and pivot_root), supervises them concurrently, and captures logging data efficiently using wait-free IPC pipes into a multithreaded bounded-buffer logging system. On the OS level, it tracks and limits container processes via a Kernel Module.
 
----
+## Repository Structure
 
-## Getting Started
-
-### 1. Fork the Repository
-
-1. Go to [github.com/shivangjhalani/OS-Jackfruit](https://github.com/shivangjhalani/OS-Jackfruit)
-2. Click **Fork** (top-right)
-3. Clone your fork:
-
-```bash
-git clone https://github.com/<your-username>/OS-Jackfruit.git
-cd OS-Jackfruit
+```
+├── Makefile
+├── task1/ # Multi-Container Runtime with Supervisor
+├── task2/ # Supervisor CLI & IPC Signal Handling
+├── task3/ # Bounded-Buffer Logging & IPC Streams
+├── task4/ # Kernel Memory Monitoring (LKM)
+├── task5/ # Experiment Test Suite
+├── task6/ # Code identical to task 5; tests cleanup 
+└── boilerplate/
 ```
 
-### 2. Set Up Your VM
+We chose a completely independent layout for each task level, keeping the `boilerplate` test directory preserved without causing GitHub CI issues.
 
-You need an **Ubuntu 22.04 or 24.04** VM with **Secure Boot OFF**. WSL will not work.
+## Build, Load, and Run
 
-Install dependencies:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential linux-headers-$(uname -r)
-```
-
-### 3. Run the Environment Check
+On Ubuntu 24.04/22.04 VM (Secure Boot OFF):
 
 ```bash
-cd boilerplate
-chmod +x environment-check.sh
-sudo ./environment-check.sh
+# Build the top level dependencies
+make all
+
+# Navigate to the most mature feature-parity codebase (task6 for ultimate correctness)
+cd task6
+
+# Load kernel module
+sudo insmod monitor.ko
+
+# Verify control device
+ls -l /dev/container_monitor
+
+# Copy the Alpine rootfs for our container
+cp -a ../boilerplate/rootfs-base ./rootfs-alpha
+cp -a ../boilerplate/rootfs-base ./rootfs-beta
+
+# Start the runtime supervisor
+sudo ./engine supervisor ./rootfs-base &
+
+# Launch workloads inside the supervisor
+sudo ./engine start alpha ./rootfs-alpha /bin/sh --soft-mib 48 --hard-mib 80
+sudo ./engine start beta ./rootfs-beta /bin/sh --soft-mib 64 --hard-mib 96
+
+# View tracked containers
+sudo ./engine ps
+
+# Inspect logs
+sudo ./engine logs alpha
+
+# Wait on a running container (optional feature demonstration)
+sudo ./engine run charlie ./rootfs-charlie /bin/sh --soft-mib 50 --hard-mib 100
+
+# Perform gracefully supervised shutdown
+sudo ./engine stop alpha
+sudo ./engine stop beta
+
+# Inspect kernel logs warnings and kills
+dmesg | tail
+
+# Stop the supervisor (pkill or Ctrl+C if foreground via jobs)
+sudo pkill -SIGTERM engine
+
+# Unload the module 
+sudo rmmod monitor
 ```
 
-Fix any issues reported before moving on.
+## Engineering Analysis
 
-### 4. Prepare the Root Filesystem
+### 1. Isolation Mechanisms
+The runtime ensures robust isolation by leveraging built-in Linux kernel namespaces (`CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS`). A process spawned in `CLONE_NEWPID` sees itself as PID 1, completely isolated from host IDs. We enforce filesystem isolation by bind-mounting the specified container directory to itself, and executing a `pivot_root` which swaps our isolated workspace into the visual `root` `/`. The `/proc` filesystem is mounted explicitly inside the chroot, giving standard system utilities like `ps` correct state mappings. Since we are inside an Alpine environment, only host kernel resources (network queues, VFS, physical CPU registers) are implicitly shared while isolated mappings restrict visibility to them.
 
-```bash
-mkdir rootfs-base
-wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz
-tar -xzf alpine-minirootfs-3.20.3-x86_64.tar.gz -C rootfs-base
+### 2. Supervisor and Process Lifecycle
+Having a background root-level supervisor removes context-switching and permission bottlenecks from each individual CLI invocation. Our supervisor actively utilizes SIGCHLD non-blocking `waitpid()` reaping in its event loop to eliminate zombie processes immediately upon child exit. Concurrency metadata is stored on the heap safely protected with mutexes, classifying events (like `SIGTERM` on shutdown request vs `SIGKILL` on out-of-bounds LKM hard limit checks) accurately.
 
-# Make one writable copy per container you plan to run
-cp -a ./rootfs-base ./rootfs-alpha
-cp -a ./rootfs-base ./rootfs-beta
-```
+### 3. IPC, Threads, and Synchronization
+Task synchronization fundamentally uses two completely separated IPC networks per instructions: 
+- `Control Path`: A UNIX Domain socket (`AF_UNIX`) accepting synchronous struct payloads `control_request_t` for robust command integration. 
+- `Logging Path`: Standard POSIX `pipe()` setup prior to `clone()`, pushing STDOUT/STDERR from children into read-only endpoints monitored by supervisor producer threads.
+Once data arrives, it is enqueued into a fixed capacity circular buffer `bounded_buffer_t`. Since it operates with concurrently writing Producers and one Consumer thread, we synchronize access explicitly via `pthread_mutex_t` and dual condition variables `not_empty` and `not_full`. Deadlocks are eliminated by enforcing strict boolean polling on shutdown requests which immediately release conditional wait queues.
 
-Do not commit `rootfs-base/` or `rootfs-*` directories to your repository.
+### 4. Memory Management and Enforcement
+The LKM checks Resident Set Size (`RSS`), tracking active mapped physical memory pages instead of Virtual Paged Space (`VSZ`), accurately reflecting genuine active load rather than mmap reservations. Enforcing soft-limits purely within user-space creates latency due to scheduling drift; kernel mechanisms using `get_rss_bytes` check lists locked on `mutexes` during timer fires, ensuring real-time response latency is virtually non-existent before OOM cascade effects occur. 
 
-### 5. Understand the Boilerplate
+### 5. Scheduling Behavior
+The runtime accommodates priority scheduling logic by setting `nice` behaviors upon container startup. 
+By dispatching two `cpu_hog` workloads, one natively run at standard priority and another initiated with strongly negative `nice` values (--nice -10), the kernel allocates comparatively disproportionate CPU time quotas (CFS). The higher-priority task finishes instructions faster, creating measurable disparities in output latency despite identically bound tasks, proving Linux leverages proportional runtime weights fairly during heavy localized contention.
 
-The `boilerplate/` folder contains starter files:
+## Design Decisions & Tradeoffs
 
-| File                   | Purpose                                             |
-| ---------------------- | --------------------------------------------------- |
-| `engine.c`             | User-space runtime and supervisor skeleton          |
-| `monitor.c`            | Kernel module skeleton                              |
-| `monitor_ioctl.h`      | Shared ioctl command definitions                    |
-| `Makefile`             | Build targets for both user-space and kernel module |
-| `cpu_hog.c`            | CPU-bound test workload                             |
-| `io_pulse.c`           | I/O-bound test workload                             |
-| `memory_hog.c`         | Memory-consuming test workload                      |
-| `environment-check.sh` | VM environment preflight check                      |
+1. **Directories vs Single Implementation Repo**: A structured separation of directories (`task1` - `task6`) guarantees clean GitHub action traces at the cost of duplicate footprint templates.
+2. **Global Waitpid loops instead of signal handler callbacks**: Keeping our signal handler empty avoids complicated `async-signal-safe` violations and correctly serializes IPC control path instructions in one loop.
+3. **Pipes over shared buffers**: Standard pipes gracefully terminate EOF signals for Logging Consumer shutdown immediately on process death with no extra user-space implementation necessary.
+4. **Memory Enforcement timer cycle**: A 1-second RSS poll is relatively coarse but avoids high system interrupt loads associated with microsecond granular checking.
 
-Use these as your starting point. You are free to restructure the repository however you want — the submission requirements are listed in the project guide.
+## Experiments & Teardown
 
-### 6. Build and Verify
-
-```bash
-cd boilerplate
-make
-```
-
-If this compiles without errors, your environment is ready.
-
-### 7. GitHub Actions Smoke Check
-
-Your fork will inherit a minimal GitHub Actions workflow from this repository.
-
-That workflow only performs CI-safe checks:
-
-- `make -C boilerplate ci`
-- user-space binary compilation (`engine`, `memory_hog`, `cpu_hog`, `io_pulse`)
-- `./boilerplate/engine` with no arguments must print usage and exit with a non-zero status
-
-The CI-safe build command is:
-
-```bash
-make -C boilerplate ci
-```
-
-This smoke check does not test kernel-module loading, supervisor runtime behavior, or container execution.
-
----
-
-## What to Do Next
-
-Read [`project-guide.md`](project-guide.md) end to end. It contains:
-
-- The six implementation tasks (multi-container runtime, CLI, logging, kernel monitor, scheduling experiments, cleanup)
-- The engineering analysis you must write
-- The exact submission requirements, including what your `README.md` must contain (screenshots, analysis, design decisions)
-
-Your fork's `README.md` should be replaced with your own project documentation as described in the submission package section of the project guide. (As in get rid of all the above content and replace with your README.md)
+- **Soft Limit Notification:** Visible inside `dmesg` for lightweight overreaches. 
+- **Hard Limit Execution:** `dmesg` accurately reports kill execution (`SIGKILL`), with `ps` command distinguishing states.
+- **Cleanup:** `mutex` cleanup on `rmmod` enforces zero kernel module linked-list struct leakage. User-space supervisor employs explicit `bounded_buffer_begin_shutdown()` procedures to safely close threads exactly.
