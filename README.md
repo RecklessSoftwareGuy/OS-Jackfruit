@@ -1,106 +1,126 @@
-# Multi-Container Linux Runtime
+# Multi-Container Linux Runtime — Task 5: Scheduler Experiments
 
-**Team Size:** 2 Students
+**Branch:** `assigned`  
+**Task:** 5 — Scheduler Experiments and Analysis
+
+---
 
 ## Overview
-This lightweight Linux container runtime creates isolated user-space processes (using namespaces and pivot_root), supervises them concurrently, and captures logging data efficiently using wait-free IPC pipes into a multithreaded bounded-buffer logging system. On the OS level, it tracks and limits container processes via a Kernel Module.
+
+This branch implements **Task 5** of the Multi-Container Runtime project. It contains a self-contained suite of scheduler experiments that demonstrate how the **Linux CFS (Completely Fair Scheduler)** handles different workloads and priority configurations.
+
+Instead of running workloads inside containers (which requires the full engine/supervisor from Tasks 1–4), this implementation launches processes directly using `fork()` and applies `nice()` values to control scheduling priority. This isolates the scheduler behaviour cleanly and makes the experiments reproducible on any Ubuntu VM.
 
 ## Repository Structure
 
 ```
-├── Makefile
-├── task1/ # Multi-Container Runtime with Supervisor
-├── task2/ # Supervisor CLI & IPC Signal Handling
-├── task3/ # Bounded-Buffer Logging & IPC Streams
-├── task4/ # Kernel Memory Monitoring (LKM)
-├── task5/ # Experiment Test Suite
-├── task6/ # Code identical to task 5; tests cleanup 
-└── boilerplate/
+├── Makefile                  # Root build — delegates to task5/
+├── README.md                 # This file
+├── instructions.md           # Step-by-step execution guide (OS Scholar)
+└── task5/
+    ├── Makefile              # Builds experiment, cpu_hog, io_pulse
+    ├── experiment.c          # Main experiment harness (runs both experiments)
+    ├── cpu_hog.c             # CPU-bound workload (tight arithmetic loop)
+    ├── io_pulse.c            # I/O-bound workload (write burst + sleep)
+    └── run_experiments.sh    # One-command wrapper to build and run everything
 ```
 
-We chose a completely independent layout for each task level, keeping the `boilerplate` test directory preserved without causing GitHub CI issues.
+## What Task 5 Demonstrates
 
-## Build, Load, and Run
+### Experiment 1: Priority Impact on CPU-Bound Processes
 
-On Ubuntu 24.04/22.04 VM (Secure Boot OFF):
+Two identical `cpu_hog` processes run simultaneously for 8 seconds each:
+- **Process A** runs at `nice=0` (default priority, CFS weight ≈ 1024)
+- **Process B** runs at `nice=10` (lower priority, CFS weight ≈ 110)
+
+**Expected Result:** Process A completes significantly more iterations per second than Process B because CFS allocates CPU time proportionally to process weight.
+
+### Experiment 2: CPU-Bound vs I/O-Bound Scheduling
+
+A `cpu_hog` (CPU-bound, 8 seconds) and an `io_pulse` (I/O-bound, 15 iterations × 200ms sleep) run concurrently at the same nice value:
+
+**Expected Result:**
+- `io_pulse` finishes first (~3 seconds) because it voluntarily yields the CPU during sleeps
+- `cpu_hog` takes its full 8 seconds but gets nearly all available CPU time
+- Neither process starves the other — CFS is both fair and responsive
+
+## Build & Run Instructions
+
+### Prerequisites
+
+Ubuntu 22.04 or 24.04 VM with build-essential:
 
 ```bash
-# Build the top level dependencies
-make all
+sudo apt update
+sudo apt install -y build-essential
+```
 
-# Navigate to the most mature feature-parity codebase (task6 for ultimate correctness)
-cd task6
+### Build
 
-# Load kernel module
-sudo insmod monitor.ko
+```bash
+make          # Build from project root
+# OR
+cd task5 && make all
+```
 
-# Verify control device
-ls -l /dev/container_monitor
+### Run the Experiments
 
-# Copy the Alpine rootfs for our container
-cp -a ../boilerplate/rootfs-base ./rootfs-alpha
-cp -a ../boilerplate/rootfs-base ./rootfs-beta
+```bash
+cd task5
+sudo ./experiment
+```
 
-# Start the runtime supervisor
-sudo ./engine supervisor ./rootfs-base &
+Or use the convenience wrapper:
 
-# Launch workloads inside the supervisor
-sudo ./engine start alpha ./rootfs-alpha /bin/sh --soft-mib 48 --hard-mib 80
-sudo ./engine start beta ./rootfs-beta /bin/sh --soft-mib 64 --hard-mib 96
+```bash
+cd task5
+chmod +x run_experiments.sh
+sudo ./run_experiments.sh
+```
 
-# View tracked containers
-sudo ./engine ps
+The wrapper saves output to `experiment_output.log` for report screenshots.
 
-# Inspect logs
-sudo ./engine logs alpha
+### Run Individual Workloads
 
-# Wait on a running container (optional feature demonstration)
-sudo ./engine run charlie ./rootfs-charlie /bin/sh --soft-mib 50 --hard-mib 100
-
-# Perform gracefully supervised shutdown
-sudo ./engine stop alpha
-sudo ./engine stop beta
-
-# Inspect kernel logs warnings and kills
-dmesg | tail
-
-# Stop the supervisor (pkill or Ctrl+C if foreground via jobs)
-sudo pkill -SIGTERM engine
-
-# Unload the module 
-sudo rmmod monitor
+```bash
+cd task5
+./cpu_hog 10          # CPU-bound for 10 seconds
+./io_pulse 20 200     # 20 I/O iterations, 200ms sleep between each
 ```
 
 ## Engineering Analysis
 
-### 1. Isolation Mechanisms
-The runtime ensures robust isolation by leveraging built-in Linux kernel namespaces (`CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS`). A process spawned in `CLONE_NEWPID` sees itself as PID 1, completely isolated from host IDs. We enforce filesystem isolation by bind-mounting the specified container directory to itself, and executing a `pivot_root` which swaps our isolated workspace into the visual `root` `/`. The `/proc` filesystem is mounted explicitly inside the chroot, giving standard system utilities like `ps` correct state mappings. Since we are inside an Alpine environment, only host kernel resources (network queues, VFS, physical CPU registers) are implicitly shared while isolated mappings restrict visibility to them.
+### 5. Scheduling Behaviour
 
-### 2. Supervisor and Process Lifecycle
-Having a background root-level supervisor removes context-switching and permission bottlenecks from each individual CLI invocation. Our supervisor actively utilizes SIGCHLD non-blocking `waitpid()` reaping in its event loop to eliminate zombie processes immediately upon child exit. Concurrency metadata is stored on the heap safely protected with mutexes, classifying events (like `SIGTERM` on shutdown request vs `SIGKILL` on out-of-bounds LKM hard limit checks) accurately.
+The Linux CFS (Completely Fair Scheduler) maintains a virtual runtime (`vruntime`) for each process. The key observations from our experiments:
 
-### 3. IPC, Threads, and Synchronization
-Task synchronization fundamentally uses two completely separated IPC networks per instructions: 
-- `Control Path`: A UNIX Domain socket (`AF_UNIX`) accepting synchronous struct payloads `control_request_t` for robust command integration. 
-- `Logging Path`: Standard POSIX `pipe()` setup prior to `clone()`, pushing STDOUT/STDERR from children into read-only endpoints monitored by supervisor producer threads.
-Once data arrives, it is enqueued into a fixed capacity circular buffer `bounded_buffer_t`. Since it operates with concurrently writing Producers and one Consumer thread, we synchronize access explicitly via `pthread_mutex_t` and dual condition variables `not_empty` and `not_full`. Deadlocks are eliminated by enforcing strict boolean polling on shutdown requests which immediately release conditional wait queues.
+**Priority and CPU Weight (Experiment 1):**
+- CFS assigns a "weight" to each process based on its nice value. The weight table maps nice=0 to weight ≈ 1024 and nice=10 to weight ≈ 110.
+- When two processes compete for the same CPU, CFS distributes time proportionally: the nice=0 process gets ~90% of CPU time; the nice=10 process gets ~10%.
+- This is proportional fair scheduling, not strict preemptive priority. The low-priority process still runs — it just gets less time.
 
-### 4. Memory Management and Enforcement
-The LKM checks Resident Set Size (`RSS`), tracking active mapped physical memory pages instead of Virtual Paged Space (`VSZ`), accurately reflecting genuine active load rather than mmap reservations. Enforcing soft-limits purely within user-space creates latency due to scheduling drift; kernel mechanisms using `get_rss_bytes` check lists locked on `mutexes` during timer fires, ensuring real-time response latency is virtually non-existent before OOM cascade effects occur. 
+**I/O-Bound vs CPU-Bound (Experiment 2):**
+- I/O-bound processes voluntarily sleep (e.g., `usleep()` between disk writes). During sleep, their `vruntime` does not advance.
+- When an I/O-bound process wakes up, its `vruntime` is relatively low, so CFS picks it up immediately — this is the "sleeper fairness" heuristic that gives I/O-bound processes high responsiveness.
+- The CPU-bound process's `vruntime` advances continuously, but it still gets scheduled fairly based on its weight. It simply never benefits from sleeper fairness.
+- **Net effect:** I/O processes feel responsive; CPU processes get throughput. Neither starves.
 
-### 5. Scheduling Behavior
-The runtime accommodates priority scheduling logic by setting `nice` behaviors upon container startup. 
-By dispatching two `cpu_hog` workloads, one natively run at standard priority and another initiated with strongly negative `nice` values (--nice -10), the kernel allocates comparatively disproportionate CPU time quotas (CFS). The higher-priority task finishes instructions faster, creating measurable disparities in output latency despite identically bound tasks, proving Linux leverages proportional runtime weights fairly during heavy localized contention.
+### Design Decisions & Tradeoffs
 
-## Design Decisions & Tradeoffs
+| Decision | Rationale | Tradeoff |
+|----------|-----------|----------|
+| Standalone fork + nice | Clean isolation of scheduler behaviour without container overhead | Does not exercise the full engine/supervisor pipeline |
+| Wall-clock timing via `clock_gettime(CLOCK_MONOTONIC)` | High-resolution, monotonic, unaffected by NTP drift | Does not measure per-process CPU time directly |
+| Inline analysis in output | Teacher sees theory alongside results | Longer terminal output |
+| 8-second experiment duration | Long enough for reliable measurement, short enough for demos | May show variance on heavily loaded VMs |
 
-1. **Directories vs Single Implementation Repo**: A structured separation of directories (`task1` - `task6`) guarantees clean GitHub action traces at the cost of duplicate footprint templates.
-2. **Global Waitpid loops instead of signal handler callbacks**: Keeping our signal handler empty avoids complicated `async-signal-safe` violations and correctly serializes IPC control path instructions in one loop.
-3. **Pipes over shared buffers**: Standard pipes gracefully terminate EOF signals for Logging Consumer shutdown immediately on process death with no extra user-space implementation necessary.
-4. **Memory Enforcement timer cycle**: A 1-second RSS poll is relatively coarse but avoids high system interrupt loads associated with microsecond granular checking.
+## Scheduler Experiment Results
 
-## Experiments & Teardown
+Results are printed inline by `./experiment`. Key metrics to compare:
 
-- **Soft Limit Notification:** Visible inside `dmesg` for lightweight overreaches. 
-- **Hard Limit Execution:** `dmesg` accurately reports kill execution (`SIGKILL`), with `ps` command distinguishing states.
-- **Cleanup:** `mutex` cleanup on `rmmod` enforces zero kernel module linked-list struct leakage. User-space supervisor employs explicit `bounded_buffer_begin_shutdown()` procedures to safely close threads exactly.
+| Metric | Experiment 1 (nice=0 vs nice=10) | Experiment 2 (CPU vs I/O) |
+|--------|----------------------------------|---------------------------|
+| **Iterations/sec** | Higher for nice=0 process | N/A (different workload types) |
+| **Wall-clock time** | Both ~8s (same requested duration) | I/O: ~3s; CPU: ~8s |
+| **Finish order** | Simultaneous (same duration) | I/O finishes first |
+| **CPU share** | ~90% / ~10% | CPU gets nearly 100% while I/O sleeps |

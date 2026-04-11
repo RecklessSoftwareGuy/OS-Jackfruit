@@ -1,15 +1,26 @@
 /*
- * io_pulse.c - I/O-oriented workload for scheduler experiments.
+ * io_pulse.c — I/O-Bound Workload for Scheduler Experiments (Task 5)
  *
- * Usage:
- *   /io_pulse [iterations] [sleep_ms]
+ * PURPOSE:
+ *   This program simulates an I/O-bound process. It alternates between
+ *   short bursts of file I/O (write + fsync) and voluntary sleeps,
+ *   causing the process to frequently yield the CPU. This makes it
+ *   ideal for comparing against a CPU-bound workload: the Linux CFS
+ *   scheduler treats I/O-bound processes differently because they
+ *   voluntarily sleep and accumulate less "virtual runtime."
  *
- * The program writes small bursts to a file and sleeps between them.
- * This gives students an easy I/O-heavy workload to compare with
- * cpu_hog when discussing responsiveness and scheduler behavior.
+ * HOW IT WORKS:
+ *   1. Opens a temporary output file for writing.
+ *   2. For each iteration: writes a small line, calls fsync() to force
+ *      the data to disk (creating a real I/O wait), then sleeps.
+ *   3. Prints a progress report after each iteration.
+ *   4. On exit, prints a summary of total iterations and elapsed time.
  *
- * If you copy this binary into an Alpine rootfs, make sure it is built in a
- * format that can run there.
+ * USAGE:
+ *   ./io_pulse [iterations] [sleep_ms]
+ *
+ * EXAMPLE:
+ *   ./io_pulse 20 200    # 20 write iterations, 200ms sleep between each
  */
 
 #include <fcntl.h>
@@ -18,6 +29,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_OUTPUT "/tmp/io_pulse.out"
@@ -35,15 +47,29 @@ static unsigned int parse_uint(const char *arg, unsigned int fallback)
 int main(int argc, char *argv[])
 {
     const unsigned int iterations = (argc > 1) ? parse_uint(argv[1], 20) : 20;
-    const unsigned int sleep_ms = (argc > 2) ? parse_uint(argv[2], 200) : 200;
+    const unsigned int sleep_ms   = (argc > 2) ? parse_uint(argv[2], 200) : 200;
     int fd;
     unsigned int i;
+    time_t start, end_time;
+
+    printf("========================================\n");
+    printf("  [IO_PULSE] STARTING I/O-BOUND WORKLOAD\n");
+    printf("========================================\n");
+    printf("  PID           : %d\n", getpid());
+    printf("  Iterations    : %u\n", iterations);
+    printf("  Sleep interval: %u ms (between I/O bursts)\n", sleep_ms);
+    printf("  Behaviour     : Write burst → fsync → sleep (yields CPU voluntarily)\n");
+    printf("  Purpose       : Demonstrate I/O-bound scheduling vs CPU-bound\n");
+    printf("========================================\n\n");
+    fflush(stdout);
 
     fd = open(DEFAULT_OUTPUT, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) {
         perror("open");
         return 1;
     }
+
+    start = time(NULL);
 
     for (i = 0; i < iterations; i++) {
         char line[128];
@@ -56,11 +82,25 @@ int main(int argc, char *argv[])
         }
 
         fsync(fd);
-        printf("[io_pulse] Wrote burst iteration #%u\n", i + 1);
+        printf("  [IO_PULSE] Completed burst #%u/%u  (wrote %d bytes, flushed to disk)\n",
+               i + 1, iterations, len);
         fflush(stdout);
         usleep(sleep_ms * 1000U);
     }
 
+    end_time = time(NULL);
     close(fd);
+
+    printf("\n========================================\n");
+    printf("  [IO_PULSE] WORKLOAD COMPLETE\n");
+    printf("========================================\n");
+    printf("  Total iterations  : %u\n", iterations);
+    printf("  Total elapsed time: %ld seconds\n", (long)(end_time - start));
+    printf("  Output file       : %s\n", DEFAULT_OUTPUT);
+    printf("  Note: This process spent most of its time sleeping (I/O wait),\n");
+    printf("        freeing the CPU for other processes to use.\n");
+    printf("========================================\n");
+    fflush(stdout);
+
     return 0;
 }

@@ -1,4 +1,4 @@
-TASKS := task1 task2 task3 task4 task5 task6
+TASKS := task5
 
 .PHONY: all clean $(TASKS)
 

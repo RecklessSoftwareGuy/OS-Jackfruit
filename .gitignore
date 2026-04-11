@@ -6,6 +6,11 @@ boilerplate/memory_hog
 boilerplate/cpu_hog
 boilerplate/io_pulse
 
+# Task 5 build artifacts
+task5/experiment
+task5/cpu_hog
+task5/io_pulse
+
 # Kernel module build artifacts
 *.ko
 *.o
