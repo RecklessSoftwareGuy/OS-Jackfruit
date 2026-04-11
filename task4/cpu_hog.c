@@ -38,13 +38,13 @@ int main(int argc, char *argv[])
 
         if (time(NULL) != last_report) {
             last_report = time(NULL);
-            printf("cpu_hog alive elapsed=%ld accumulator=%llu\n",
+            printf("[cpu_hog] Working... Elapsed: %lds | Accumulator: %llu\n",
                    (long)(last_report - start),
                    accumulator);
             fflush(stdout);
         }
     }
 
-    printf("cpu_hog done duration=%u accumulator=%llu\n", duration, accumulator);
+    printf("[cpu_hog] Completed execution. Total Duration: %us | Final Accumulator: %llu\n", duration, accumulator);
     return 0;
 }

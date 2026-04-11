@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
         }
 
         fsync(fd);
-        printf("io_pulse wrote iteration=%u\n", i + 1);
+        printf("[io_pulse] Wrote burst iteration #%u\n", i + 1);
         fflush(stdout);
         usleep(sleep_ms * 1000U);
     }

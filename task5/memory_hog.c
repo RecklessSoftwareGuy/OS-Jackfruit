@@ -54,7 +54,7 @@ int main(int argc, char *argv[])
 
         memset(mem, 'A', chunk_bytes);
         count++;
-        printf("allocation=%d chunk=%zuMB total=%zuMB\n",
+        printf("[memory_hog] Allocation #%d | Chunk: %zuMB | Total RSS usage: %zuMB\n",
                count, chunk_mb, (size_t)count * chunk_mb);
         fflush(stdout);
         usleep(sleep_us);

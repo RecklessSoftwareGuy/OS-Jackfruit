@@ -577,7 +577,7 @@ static int run_supervisor(const char *rootfs)
 
     pthread_create(&ctx.logger_thread, NULL, logging_thread, &ctx);
 
-    printf("Supervisor started with base rootfs %s\n", rootfs);
+    printf("[SUPERVISOR] Listening for incoming CLI connections...\n[SUPERVISOR] Managed base rootfs: %s\n", rootfs);
 
     while (!ctx.should_stop) {
         int client_fd = accept(ctx.server_fd, NULL, NULL);
@@ -609,7 +609,7 @@ static int run_supervisor(const char *rootfs)
                                     curr->state = CONTAINER_EXITED;
                                 }
                             }
-                            printf("Container %s exited with state %s\n", curr->id, state_to_string(curr->state));
+                            printf("[SUPERVISOR] -> Child Container '%s' exited cleanly. Final State: %s\n", curr->id, state_to_string(curr->state));
                             break;
                         }
                         curr = curr->next;
@@ -784,7 +784,7 @@ static int send_control_request(const control_request_t *req)
         if (req->kind == CMD_PS) {
             printf("%s\n", res.message);
         } else {
-            printf("Success: %s\n", res.message);
+            printf("[RUNTIME CLI] Success: %s\n", res.message);
         }
     }
 
@@ -859,12 +859,12 @@ static int cmd_run(int argc, char *argv[])
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    printf("Waiting for container %s to exit...\n", req.container_id);
+    printf("[RUNTIME CLI] Waiting on foreground execution of container '%s'...\n", req.container_id);
 
     while (1) {
         if (run_interrupted) {
             run_interrupted = 0;
-            printf("\nInterrupted! Sending stop to %s...\n", run_target_id);
+            printf("\n[RUNTIME CLI] Foreground wait interrupted! Sending clean termination signal to '%s'...\n", run_target_id);
             control_request_t stop_req;
             memset(&stop_req, 0, sizeof(stop_req));
             stop_req.kind = CMD_STOP;
@@ -895,7 +895,7 @@ static int cmd_run(int argc, char *argv[])
                                 char *exit_code_str = strstr(ptr, "ExitCode: ");
                                 if (exit_code_str) {
                                     int code = atoi(exit_code_str + 10);
-                                    printf("Container exited with code %d\n", code);
+                                    printf("[RUNTIME CLI] Target Container terminated. Final Exit Code: %d\n", code);
                                     close(sock);
                                     return code;
                                 }

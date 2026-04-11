@@ -31,28 +31,25 @@
 
 #define DEVICE_NAME "container_monitor"
 #define CHECK_INTERVAL_SEC 1
+#define CONTAINER_ID_LEN 32
 
 /* ==============================================================
  * TODO 1: Define your linked-list node struct.
- *
- * Requirements:
- *   - track PID, container ID, soft limit, and hard limit
- *   - remember whether the soft-limit warning was already emitted
- *   - include `struct list_head` linkage
  * ============================================================== */
-
+struct monitor_node {
+    pid_t pid;
+    char container_id[CONTAINER_ID_LEN];
+    unsigned long soft_limit_bytes;
+    unsigned long hard_limit_bytes;
+    bool soft_limit_warned;
+    struct list_head list;
+};
 
 /* ==============================================================
  * TODO 2: Declare the global monitored list and a lock.
- *
- * Requirements:
- *   - shared across ioctl and timer code paths
- *   - protect insert, remove, and iteration safely
- *
- * You may choose either a mutex or a spinlock, but your README must
- * justify the choice in terms of the code paths you implemented.
  * ============================================================== */
-
+static LIST_HEAD(monitored_tasks);
+static DEFINE_MUTEX(monitor_lock);
 
 /* --- Provided: internal device / timer state --- */
 static struct timer_list monitor_timer;
@@ -136,14 +133,32 @@ static void timer_callback(struct timer_list *t)
 {
     /* ==============================================================
      * TODO 3: Implement periodic monitoring.
-     *
-     * Requirements:
-     *   - iterate through tracked entries safely
-     *   - remove entries for exited processes
-     *   - emit soft-limit warning once per entry
-     *   - enforce hard limit and then remove the entry
-     *   - avoid use-after-free while deleting during iteration
      * ============================================================== */
+    struct monitor_node *node, *next;
+    long rss;
+
+    mutex_lock(&monitor_lock);
+    list_for_each_entry_safe(node, next, &monitored_tasks, list) {
+        rss = get_rss_bytes(node->pid);
+        if (rss < 0) {
+            list_del(&node->list);
+            kfree(node);
+            continue;
+        }
+
+        if (rss > (long)node->hard_limit_bytes) {
+            kill_process(node->container_id, node->pid, node->hard_limit_bytes, rss);
+            list_del(&node->list);
+            kfree(node);
+            continue;
+        }
+
+        if (rss > (long)node->soft_limit_bytes && !node->soft_limit_warned) {
+            log_soft_limit_event(node->container_id, node->pid, node->soft_limit_bytes, rss);
+            node->soft_limit_warned = true;
+        }
+    }
+    mutex_unlock(&monitor_lock);
 
     mod_timer(&monitor_timer, jiffies + CHECK_INTERVAL_SEC * HZ);
 }
@@ -174,12 +189,20 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
         /* ==============================================================
          * TODO 4: Add a monitored entry.
-         *
-         * Requirements:
-         *   - allocate and initialize one node from req
-         *   - validate allocation and limits
-         *   - insert into the shared list under the chosen lock
          * ============================================================== */
+        struct monitor_node *node = kmalloc(sizeof(*node), GFP_KERNEL);
+        if (!node) return -ENOMEM;
+        
+        node->pid = req.pid;
+        strncpy(node->container_id, req.container_id, sizeof(node->container_id) - 1);
+        node->container_id[sizeof(node->container_id) - 1] = '\0';
+        node->soft_limit_bytes = req.soft_limit_bytes;
+        node->hard_limit_bytes = req.hard_limit_bytes;
+        node->soft_limit_warned = false;
+
+        mutex_lock(&monitor_lock);
+        list_add_tail(&node->list, &monitored_tasks);
+        mutex_unlock(&monitor_lock);
 
         return 0;
     }
@@ -190,14 +213,22 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 
     /* ==============================================================
      * TODO 5: Remove a monitored entry on explicit unregister.
-     *
-     * Requirements:
-     *   - search by PID, container ID, or both
-     *   - remove the matching entry safely if found
-     *   - return status indicating whether a matching entry was removed
      * ============================================================== */
-
-    return -ENOENT;
+    {
+        struct monitor_node *node, *next;
+        int found = 0;
+        mutex_lock(&monitor_lock);
+        list_for_each_entry_safe(node, next, &monitored_tasks, list) {
+            if (node->pid == req.pid && strncmp(node->container_id, req.container_id, CONTAINER_ID_LEN) == 0) {
+                list_del(&node->list);
+                kfree(node);
+                found = 1;
+                break;
+            }
+        }
+        mutex_unlock(&monitor_lock);
+        return found ? 0 : -ENOENT;
+    }
 }
 
 /* --- Provided: file operations --- */
@@ -254,11 +285,16 @@ static void __exit monitor_exit(void)
 
     /* ==============================================================
      * TODO 6: Free all remaining monitored entries.
-     *
-     * Requirements:
-     *   - remove and free every list node safely
-     *   - leave no leaked state on module unload
      * ============================================================== */
+    {
+        struct monitor_node *node, *next;
+        mutex_lock(&monitor_lock);
+        list_for_each_entry_safe(node, next, &monitored_tasks, list) {
+            list_del(&node->list);
+            kfree(node);
+        }
+        mutex_unlock(&monitor_lock);
+    }
 
     cdev_del(&c_dev);
     device_destroy(cl, dev_num);
