@@ -1,9 +1,4 @@
-# OS Scholar's Comprehensive Guide: The Multi-Container Runtime Curriculum
-
-Greetings, scholar. I have expanded this guide to cover the full implementation of all six tasks defined in the OS-Jackfruit project. 
-
-In this curriculum, we move beyond simple cleanup and explore the evolution of our container runtime—from namespace isolation to kernel-level memory enforcement and scheduling analysis. We will use the final, cumulative implementation in `task6` to demonstrate all features.
-
+# Comprehensive Guide: The Multi-Container Runtime Curriculum
 ---
 
 ### Phase 0: The Laboratory Foundation
@@ -150,5 +145,3 @@ By executing these phases, you have traversed the entire landscape of modern con
 - **Task 4** bridged the gap between user-space intent and kernel-space enforcement.
 - **Task 5** provided empirical evidence of OS scheduling heuristics.
 - **Task 6** upheld the engineering standards of resource discipline.
-
-Do you wish to dive deeper into the `ioctl` implementation details or the synchronization primitives used in the bounded buffer? I remain at your service.
